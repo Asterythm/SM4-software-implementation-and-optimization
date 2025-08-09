@@ -1,12 +1,12 @@
 #include <stdint.h>
 #include <immintrin.h>
+#include <String.h>
 #include <stdio.h>
-#include <string.h>
 #include "sm4.h"
 
 // SM4 S-box (simplified, use GM/T 0002-2012 for full table)
 static const uint8_t Sbox[256] = {
-0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
+    0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
     0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99,
     0x9c, 0x42, 0x50, 0xf4, 0x91, 0xef, 0x98, 0x7a, 0x33, 0x54, 0x0b, 0x43, 0xed, 0xcf, 0xac, 0x62,
     0xe4, 0xb3, 0x1c, 0xa9, 0xc9, 0x08, 0xe8, 0x95, 0x80, 0xdf, 0x94, 0xfa, 0x75, 0x8f, 0x3f, 0xa6,
@@ -73,25 +73,22 @@ void sm4_ttable_round(uint32_t *state, uint32_t rk) {
     state[3] = tmp;
 }
 
-#ifdef USE_AESNI
-// AES-NI optimized S-box using __builtin_ia32_aesenc128
+// AES-NI optimized S-box
 __m128i sm4_aesni_sbox(__m128i x) {
-    __m128i key = _mm_setzero_si128();
-    __m128i s = __builtin_ia32_aesenc128(x, key); // Requires -maes -msse2 -mvaes -mavx512vl
-    // Simplified affine transform (actual matrix omitted for SM4 compatibility)
+    __m128i s = _mm_aesenclast_si128(x, _mm_setzero_si128());
+    // Simplified affine transform (actual matrix omitted)
     return s;
 }
-#else
-// Fallback S-box using table lookup
-__m128i sm4_aesni_sbox(__m128i x) {
-    uint8_t *b = (uint8_t*)&x;
-    uint32_t t = 0;
-    for (int i = 0; i < 4; i++) {
-        t |= ((uint32_t)Sbox[b[i]]) << (24 - i * 8);
-    }
-    return _mm_set_epi32(t, t, t, t); // Simplified, adjust for actual use
+
+// VPROLD optimized linear transform
+__m512i sm4_vprold_linear(__m512i t) {
+    __m512i t1 = _mm512_rol_epi32(t, 2);
+    __m512i t2 = _mm512_rol_epi32(t, 10);
+    __m512i t3 = _mm512_rol_epi32(t, 18);
+    __m512i t4 = _mm512_rol_epi32(t, 24);
+    return _mm512_xor_si512(_mm512_xor_si512(t, t1),
+                            _mm512_xor_si512(t2, _mm512_xor_si512(t3, t4)));
 }
-#endif
 
 // Initialize T-table
 void init_ttable(void) {
@@ -102,9 +99,9 @@ void init_ttable(void) {
     }
 }
 
-// Basic SM4 encryption
+// SM4 encryption
 void sm4_encrypt(const uint8_t *key, const uint8_t *plaintext, uint8_t *ciphertext) {
-    uint32_t rk[32]; // Simplified key schedule (implement per GM/T 0002-2012)
+    uint32_t rk[32]; // Simplified key schedule
     uint32_t state[4];
     memcpy(state, plaintext, 16);
     // Key expansion (simplified)
@@ -115,7 +112,7 @@ void sm4_encrypt(const uint8_t *key, const uint8_t *plaintext, uint8_t *cipherte
     for (int i = 0; i < 32; i++) {
         sm4_ttable_round(state, rk[i]);
     }
-    // Reverse output for SM4
+    // Reverse output
     for (int i = 0; i < 4; i++) {
         ((uint32_t*)ciphertext)[i] = state[3 - i];
     }

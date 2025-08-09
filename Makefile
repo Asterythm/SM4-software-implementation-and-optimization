@@ -1,6 +1,6 @@
 # Compiler and flags
 CC = gcc
-CFLAGS = -O3 -maes -msse2 -mvaes -mavx512vl -Wall -Wextra
+CFLAGS = -O3 -march=native -maes -mavx512f -Wall -Wextra
 LDFLAGS =
 
 # Source and output
@@ -21,7 +21,7 @@ $(EXEC): $(OBJ)
 
 # Clean up
 clean:
-	del /F /Q $(OBJ) $(EXEC).exe 2>nul || exit 0
+	rm -f $(OBJ) $(EXEC)
 
 # Phony targets
 .PHONY: all clean
