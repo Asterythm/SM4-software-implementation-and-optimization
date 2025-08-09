@@ -73,3 +73,4 @@ make
 - `sm4.c` - 核心实现，包含各类优化版本
 - `Makefile` - 构建系统配置
 
+参考链接：https://n0va-scy.github.io/2022/02/14/sm4加密算法/
