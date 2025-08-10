@@ -1,10 +1,10 @@
 #include <stdint.h>
 #include <immintrin.h>
-#include <String.h>
+#include <string.h>
 #include <stdio.h>
 #include "sm4.h"
 
-// SM4 S-box (simplified, use GM/T 0002-2012 for full table)
+// SM4 S-box (full table per GM/T 0002-2012)
 static const uint8_t Sbox[256] = {
     0xd6, 0x90, 0xe9, 0xfe, 0xcc, 0xe1, 0x3d, 0xb7, 0x16, 0xb6, 0x14, 0xc2, 0x28, 0xfb, 0x2c, 0x05,
     0x2b, 0x67, 0x9a, 0x76, 0x2a, 0xbe, 0x04, 0xc3, 0xaa, 0x44, 0x13, 0x26, 0x49, 0x86, 0x06, 0x99,
@@ -30,6 +30,7 @@ static uint32_t T_table[256];
 // SM4 round constants
 static const uint32_t FK[4] = {0xa3b1bac6, 0x56aa3350, 0x677d9197, 0xb27022dc};
 static const uint32_t CK[32] = {
+    0x00070e15, 0x1c232a31, 0x383f464d, 0x545b6269,
     0x70777e85, 0x8c939aa1, 0xa8afb6bd, 0xc4cbd2d9,
     0xe0e7eef5, 0xfc030a11, 0x181f262d, 0x343b4249,
     0x50575e65, 0x6c737a81, 0x888f969d, 0xa4abb2b9,
@@ -73,13 +74,50 @@ void sm4_ttable_round(uint32_t *state, uint32_t rk) {
     state[3] = tmp;
 }
 
-// AES-NI optimized S-box
+#ifdef USE_AESNI
+// AES-NI optimized S-box using __builtin_ia32_aesenc128
 __m128i sm4_aesni_sbox(__m128i x) {
-    __m128i s = _mm_aesenclast_si128(x, _mm_setzero_si128());
+    __m128i key = _mm_setzero_si128();
+    __m128i s = __builtin_ia32_aesenc128(x, key); // Requires -maes -msse2 -mvaes -mavx512vl
+    // Simplified affine transform (actual matrix omitted for SM4 compatibility)
+    return s;
+}
+#else
+// Fallback S-box using table lookup
+__m128i sm4_aesni_sbox(__m128i x) {
+    uint8_t *b = (uint8_t*)&x;
+    uint32_t t = 0;
+    for (int i = 0; i < 4; i++) {
+        t |= ((uint32_t)Sbox[b[i]]) << (24 - i * 8);
+    }
+    return _mm_set_epi32(t, t, t, t); // Simplified, adjust for actual use
+}
+#endif
+
+#ifdef USE_GFNI
+// GFNI optimized S-box
+__m512i sm4_gfni_sbox(__m512i x) {
+    __m512i s = _mm512_gf2p8affine_epi64_epi8(x, _mm512_set1_epi64(0x01), 0);
     // Simplified affine transform (actual matrix omitted)
     return s;
 }
+#else
+// Fallback to AES-NI or T-table for S-box
+__m512i sm4_gfni_sbox(__m512i x) {
+    #ifdef USE_AESNI
+    return _mm512_castsi128_si512(sm4_aesni_sbox(_mm512_castsi512_si128(x))); // Cast to 128-bit and use AES-NI
+    #else
+    uint8_t *b = (uint8_t*)&x;
+    uint32_t t = 0;
+    for (int i = 0; i < 4; i++) {
+        t |= ((uint32_t)Sbox[b[i]]) << (24 - i * 8);
+    }
+    return _mm512_set1_epi32(t); // Simplified, adjust for actual use
+    #endif
+}
+#endif
 
+#ifdef USE_AVX512
 // VPROLD optimized linear transform
 __m512i sm4_vprold_linear(__m512i t) {
     __m512i t1 = _mm512_rol_epi32(t, 2);
@@ -89,6 +127,15 @@ __m512i sm4_vprold_linear(__m512i t) {
     return _mm512_xor_si512(_mm512_xor_si512(t, t1),
                             _mm512_xor_si512(t2, _mm512_xor_si512(t3, t4)));
 }
+#else
+// Fallback linear transform
+__m128i sm4_vprold_linear(__m128i t) {
+    uint32_t t_val = _mm_cvtsi128_si32(t);
+    t_val = t_val ^ ((t_val << 2) | (t_val >> 30)) ^ ((t_val << 10) | (t_val >> 22)) ^
+            ((t_val << 18) | (t_val >> 14)) ^ ((t_val << 24) | (t_val >> 8));
+    return _mm_set1_epi32(t_val);
+}
+#endif
 
 // Initialize T-table
 void init_ttable(void) {
@@ -99,37 +146,64 @@ void init_ttable(void) {
     }
 }
 
-// SM4 encryption
-void sm4_encrypt(const uint8_t *key, const uint8_t *plaintext, uint8_t *ciphertext) {
+// SM4-GCM encryption
+void sm4_gcm_encrypt(const uint8_t *key, const uint8_t *iv, size_t iv_len,
+                     const uint8_t *aad, size_t aad_len,
+                     const uint8_t *plaintext, size_t plaintext_len,
+                     uint8_t *ciphertext, uint8_t *tag) {
     uint32_t rk[32]; // Simplified key schedule
     uint32_t state[4];
-    memcpy(state, plaintext, 16);
     // Key expansion (simplified)
     for (int i = 0; i < 32; i++) {
         rk[i] = FK[i % 4] ^ CK[i];
     }
-    // Encryption rounds
+    // Initialize GCM
+    __m128i H = _mm_setzero_si128();
+    uint8_t counter[16];
+    memcpy(counter, iv, iv_len);
+    counter[iv_len] = 0; counter[iv_len + 1] = 0; counter[iv_len + 2] = 0; counter[iv_len + 3] = 1;
+    // Encrypt counter to get H
+    memcpy(state, counter, 16);
     for (int i = 0; i < 32; i++) {
         sm4_ttable_round(state, rk[i]);
     }
-    // Reverse output
-    for (int i = 0; i < 4; i++) {
-        ((uint32_t*)ciphertext)[i] = state[3 - i];
+    memcpy((uint8_t*)&H, state, 16);
+    // Process AAD (simplified)
+    // ... (GHASH for AAD omitted)
+    // Encrypt plaintext
+    for (size_t i = 0; i < plaintext_len; i += 16) {
+        counter[15]++;
+        memcpy(state, counter, 16);
+        for (int j = 0; j < 32; j++) {
+            sm4_ttable_round(state, rk[j]);
+        }
+        __m128i keystream = _mm_loadu_si128((const __m128i*)state);
+        __m128i pt = _mm_loadu_si128((const __m128i*)(plaintext + i));
+        __m128i ct = _mm_xor_si128(pt, keystream);
+        _mm_storeu_si128((__m128i*)(ciphertext + i), ct);
+        // Update GHASH (simplified)
     }
+    // Compute tag (simplified)
+    // ... (GHASH finalization omitted)
 }
 
 int main(void) {
     init_ttable();
     uint8_t key[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
                        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10};
+    uint8_t iv[12] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                      0x08, 0x09, 0x0a, 0x0b};
     uint8_t plaintext[16] = {0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef,
                             0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10};
     uint8_t ciphertext[16];
+    uint8_t tag[16];
 
-    sm4_encrypt(key, plaintext, ciphertext);
+    sm4_gcm_encrypt(key, iv, 12, NULL, 0, plaintext, 16, ciphertext, tag);
 
     printf("Ciphertext: ");
     for (int i = 0; i < 16; i++) printf("%02x ", ciphertext[i]);
+    printf("\nTag: ");
+    for (int i = 0; i < 16; i++) printf("%02x ", tag[i]);
     printf("\n");
 
     return 0;

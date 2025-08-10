@@ -13,8 +13,12 @@
 void sm4_round(uint32_t *state, uint32_t rk);
 void sm4_ttable_round(uint32_t *state, uint32_t rk);
 __m128i sm4_aesni_sbox(__m128i x);
+__m512i sm4_gfni_sbox(__m512i x);
 __m512i sm4_vprold_linear(__m512i t);
 void init_ttable(void);
-void sm4_encrypt(const uint8_t *key, const uint8_t *plaintext, uint8_t *ciphertext);
+void sm4_gcm_encrypt(const uint8_t *key, const uint8_t *iv, size_t iv_len,
+                     const uint8_t *aad, size_t aad_len,
+                     const uint8_t *plaintext, size_t plaintext_len,
+                     uint8_t *ciphertext, uint8_t *tag);
 
 #endif // SM4_H
